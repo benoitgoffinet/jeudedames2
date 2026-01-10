@@ -1897,18 +1897,14 @@ with ui.dialog().props('persistent') as name_dialog:
                  'joueur': player_name,
                  'time': state['timefinal']
                 }
-                print(f'players')
-                print(f'{players}')
-                print(f'{player_name}')
-                print(f'{state['timefinal']}')
+                
                 if os.path.exists("listes.pkl"):
                   dfliste = pd.read_pickle("listes.pkl")
                   dfliste = pd.concat(
                   [dfliste, players],
                   ignore_index=True
                   )
-                  print(f'dfliste')
-                  print(f'{dfliste}')
+                  
                   dfliste.to_pickle("listes.pkl")
                 else:
                   players.to_pickle("listes.pkl")
