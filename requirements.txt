@@ -1,0 +1,6 @@
+nicegui>=1.4
+pandas
+numpy
+joblib
+scikit-learn
+dill
