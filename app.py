@@ -93,9 +93,6 @@ ndfdataframe = pd.DataFrame()
 def update_best_results():
     dflist = joblib.load("listes.pkl")
 
-    print(dflist.head())
-    print(dflist.shape)
-
     results_column.clear()
 
     top10 = get_top_10(dflist)  # 👈 ON PASSE LE BON DF
@@ -998,7 +995,6 @@ def partiia():
            ndfdataframe = pd.DataFrame()
            break
         if state['coup'] > 150:
-           print('partie trop longue')
            ndfdataframe = pd.DataFrame()
            break
         if joueur == 'black':
@@ -1209,7 +1205,6 @@ def movejetons(row, col, tab):
 
     if state['eat'] == 1:
         #regarder dans le tableau si la case active est une dame ou un pion et quelle est le type de deplacement
-        print('saut')
         if 'pionselect' in state['tabeating'][src_row][src_col]: 
             if 'prise pion' in state['tabeating'][row][col] and (('gauche' in state['tabeating'][src_row][src_col] and 'gauche' in state['tabeating'][row][col]) or ('droite' in state['tabeating'][src_row][src_col] and 'droite' in state['tabeating'][row][col])):
                 mid_row = (src_row + row) // 2
@@ -1284,7 +1279,6 @@ def movejetons(row, col, tab):
                     manger = 1
                     state['rowsaut'] = row
                     state['colsaut'] = col
-            print(f'manger = {manger}')
             if manger == 0:
                 show_message('Vous devez obligatoirement manger !')
                 state['rows'] = None
@@ -1493,7 +1487,6 @@ def evaluationdeplacement(tab):
                     if score < meilleur_score:
                         meilleur_score = score
                         meilleur_coup = (row, col, new_row, new_col)
-                    print(f'patch = {patch}')
                     print(f'score = {score}')
                     print(f'meilleur_score = {meilleur_score}')
                     print(f'row = {row}')
@@ -1505,7 +1498,6 @@ def evaluationdeplacement(tab):
             # =========================
             if 'dame' in token._classes:
                 directions = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
-                print('dameintokenclass')
                 for dr, dc in directions:
                     new_row = row + dr
                     new_col = col + dc
@@ -1564,7 +1556,6 @@ def nevaluationdeplacement(tab, couleur):
         dir_pion = -1
         model = modelwhite
 
-    print(f'couleur_token {couleur_token}')
 
     for row in range(TAILLE):
         for col in range(TAILLE):
@@ -1888,7 +1879,6 @@ with ui.dialog().props('persistent') as name_dialog:
         ).style('width: 100%; margin-bottom: 20px;')
 
         def validate_name():
-            print('validate')
             global player_name
             if name_input.value:
                 player_name = name_input.value
