@@ -1,10 +1,12 @@
 nicegui>=1.4
 pandas
-numpy
-joblib
-scikit-learn
+numpy<2
+joblib==1.2.0
+scikit-learn==1.3.2
 dill
 azure-storage-blob
-tensorflow==2.13.0
+tensorflow==2.13.1
 keras==2.13.1
+
+
 
