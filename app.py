@@ -25,7 +25,7 @@ name_input = None
 name_dialog = None
 _model_black = None
 MODEL_CONTAINER = "model"
-MODEL_BLOB_NAME = "modelnoirtransfert2.pkl"
+MODEL_BLOB_NAME = "modelnoir.pkl"
 
 def load_model_from_blob():
     base_dir = "/home"
