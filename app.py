@@ -31,28 +31,36 @@ def load_model_from_blob():
     base_dir = "/home"
     local_model_path = os.path.join(base_dir, MODEL_BLOB_NAME)
 
-    # si déjà téléchargé, on réutilise
+    # ⚠️ supprimer un fichier partiel
     if os.path.exists(local_model_path):
-        return joblib.load(local_model_path)
+        try:
+            return joblib.load(local_model_path)
+        except Exception:
+            print("⚠️ Modèle local corrompu, re-téléchargement")
+            os.remove(local_model_path)
 
     connect_str = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
+
     blob_service = BlobServiceClient.from_connection_string(connect_str)
     blob_client = blob_service.get_blob_client(
         container=MODEL_CONTAINER,
         blob=MODEL_BLOB_NAME
     )
 
+    print("⬇️ Téléchargement du modèle depuis Azure Blob…")
+    data = blob_client.download_blob().readall()
+
     with open(local_model_path, "wb") as f:
-        f.write(blob_client.download_blob().readall())
+        f.write(data)
 
     return joblib.load(local_model_path)
 
 def get_model_black():
     global _model_black
     if _model_black is None:
-        print("⏳ Chargement du modèle depuis Blob Storage...")
+        print("⏳ Chargement du modèle IA…")
         _model_black = load_model_from_blob()
-        print("✅ Modèle prêt")
+        print("✅ Modèle IA prêt")
     return _model_black
 modelblack = get_model_black()
 LIST_FILE = "listes.pkl"
