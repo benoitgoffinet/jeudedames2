@@ -23,6 +23,7 @@ time_label = None
 player_name = ''
 name_input = None
 name_dialog = None
+_model_black = None
 
 def load_model_from_blob():
     base_dir = "/home"
