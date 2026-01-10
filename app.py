@@ -24,7 +24,7 @@ player_name = ''
 name_input = None
 name_dialog = None
 _model_black = None
-MODEL_CONTAINER = "modele"
+MODEL_CONTAINER = "model"
 MODEL_BLOB_NAME = "modelnoirtransfert2.pkl"
 
 def load_model_from_blob():
