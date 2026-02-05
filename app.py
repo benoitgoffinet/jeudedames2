@@ -8,7 +8,19 @@ import copy
 import random
 import time
 from azure.storage.blob import BlobServiceClient
-
+try:
+    import keras
+    # Créer les modules manquants pour la désérialisation
+    if not hasattr(keras, 'src'):
+        import types
+        keras.src = types.ModuleType('keras.src')
+        keras.src.saving = types.ModuleType('keras.src.saving')
+        keras.src.saving.keras_saveable = types.ModuleType('keras.src.saving.keras_saveable')
+        sys.modules['keras.src'] = keras.src
+        sys.modules['keras.src.saving'] = keras.src.saving
+        sys.modules['keras.src.saving.keras_saveable'] = keras.src.saving.keras_saveable
+except ImportError:
+    pass
 
 
 
