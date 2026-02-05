@@ -10,6 +10,7 @@ import time
 import tensorflow as tf
 import keras
 import joblib
+import logging
 from azure.storage.blob import BlobServiceClient
 from io import BytesIO
 
