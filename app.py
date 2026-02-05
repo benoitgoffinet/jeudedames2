@@ -1694,7 +1694,7 @@ def selectcase(row, col, couleurenemy, couleur):
 
       if state['eatsaut'] == 1 :
           if row != state['rowsaut'] or col != state['colsaut']:
-              show_message(f'Vous devez continuer de manger avec row = {state['rowsaut']} col =  {state['colsaut']}')
+              show_message(f"Vous devez continuer de manger avec row = {state['rowsaut']} col = {state['colsaut']}")
               state['rows'] = None
               state['cols'] = None
               state['caseactive'] = False
