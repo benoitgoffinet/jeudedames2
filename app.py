@@ -7,22 +7,106 @@ import joblib
 import copy
 import random
 import time
+import tensorflow as tf
+import keras
+import joblib
 from azure.storage.blob import BlobServiceClient
-try:
-    import keras
-    # Créer les modules manquants pour la désérialisation
-    if not hasattr(keras, 'src'):
-        import types
-        keras.src = types.ModuleType('keras.src')
-        keras.src.saving = types.ModuleType('keras.src.saving')
-        keras.src.saving.keras_saveable = types.ModuleType('keras.src.saving.keras_saveable')
-        sys.modules['keras.src'] = keras.src
-        sys.modules['keras.src.saving'] = keras.src.saving
-        sys.modules['keras.src.saving.keras_saveable'] = keras.src.saving.keras_saveable
-except ImportError:
-    pass
+from io import BytesIO
+
+# Configuration
+
+connect_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")  # Récupère la connection string depuis les variables d'environnement
+
+# Initialisation du client Blob Storage
+blob_service = BlobServiceClient.from_connection_string(connect_str)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
+def save_model_to_blob(model, blob_name, container_name, blob_service):
+    """
+    Sauvegarde un modèle/DataFrame dans Azure Blob Storage.
+
+    Args:
+        model: Objet à sauvegarder (modèle sklearn, DataFrame pandas, etc.)
+        blob_name (str): Nom du fichier dans le blob (ex: "listes.pkl")
+        container_name (str): Nom du conteneur Azure
+        blob_service: Instance de BlobServiceClient
+
+    Returns:
+        bool: True si succès, False sinon
+    """
+    try:
+        # 1. Sérialisation en mémoire
+        buffer = BytesIO()
+        
+        # Choix automatique entre pickle pandas ou joblib
+        if hasattr(model, 'to_pickle'):  # Si c'est un DataFrame pandas
+            model.to_pickle(buffer)
+        else:  # Sinon utiliser joblib (pour les modèles sklearn)
+            import joblib
+            joblib.dump(model, buffer)
+        
+        buffer.seek(0)
+
+        # 2. Upload vers Azure
+        blob_client = blob_service.get_blob_client(
+            container=container_name, 
+            blob=blob_name
+        )
+        blob_client.upload_blob(buffer, overwrite=True)
+
+        logging.info(f"✅ {blob_name} sauvegardé avec succès dans {container_name}")
+        return True
+
+    except Exception as e:
+        logging.error(f"❌ Échec de la sauvegarde de {blob_name}: {str(e)}", exc_info=True)
+        return False
+
+
+
+
+def load_model_from_blob(blob_name, MODEL_CONTAINER, blob_service, default=None):
+    """
+    Charge un modèle depuis Azure Blob Storage avec gestion des erreurs.
+
+    Args:
+        blob_name (str): Nom du fichier modèle dans le conteneur.
+        MODEL_CONTAINER (str): Nom du conteneur Azure.
+        blob_service: Instance de BlobServiceClient.
+        default: Valeur à retourner si le chargement échoue (None par défaut).
+
+    Returns:
+        Le modèle chargé ou la valeur par défaut en cas d'échec.
+    """
+    try:
+        # Vérification de l'existence du blob
+        blob_client = blob_service.get_blob_client(container=MODEL_CONTAINER, blob=blob_name)
+        if not blob_client.exists():
+            logger.warning(f"Blob {blob_name} introuvable dans le conteneur {MODEL_CONTAINER}")
+            return default
+
+        # Téléchargement et chargement
+        download_stream = blob_client.download_blob()
+        model = joblib.load(BytesIO(download_stream.readall()))
+        logger.info(f"Modèle {blob_name} chargé avec succès")
+        return model
+
+    except ResourceNotFoundError:
+        logger.error(f"Conteneur {MODEL_CONTAINER} ou blob {blob_name} introuvable")
+        return default
+    except PermissionError:
+        logger.error(f"Permissions insuffisantes pour accéder à {blob_name}")
+        return default
+    except (EOFError, ValueError) as e:
+        logger.error(f"Fichier {blob_name} corrompu: {str(e)}")
+        return default
+    except AzureError as e:
+        logger.error(f"Erreur Azure lors du chargement de {blob_name}: {str(e)}")
+        return default
+    except Exception as e:
+        logger.error(f"Erreur inattendue lors du chargement de {blob_name}: {str(e)}")
+        return default
 
 
 ui.run(
@@ -35,52 +119,22 @@ time_label = None
 player_name = ''
 name_input = None
 name_dialog = None
-_model_black = None
-MODEL_CONTAINER = "model"
-MODEL_BLOB_NAME = "modelnoir.pkl"
+etat = 0
+menu_container = ui.element('div')
+modelblackdefense = load_model_from_blob("modelnoirdefense.pkl", "model", blob_service)
+modelblackattaque = load_model_from_blob("modelnoirattaque.pkl", "model", blob_service)
+modelblackdefensedames = load_model_from_blob("modelnoirdefensedames.pkl", "model", blob_service)
+modelblackattaquedames = load_model_from_blob("modelnoirattaquedames.pkl", "model", blob_service)
+modelblack = load_model_from_blob("modelnoirtransfert1.pkl", "model", blob_service)
+modelblackdefensemaitre = load_model_from_blob("modelnoirdefense2.pkl", "model", blob_service)
+modelblackattaquemaitre = load_model_from_blob("modelnoirattaque2.pkl", "model", blob_service)
 
-def load_model_from_blob():
-    base_dir = "/home"
-    local_model_path = os.path.join(base_dir, MODEL_BLOB_NAME)
 
-    # ⚠️ supprimer un fichier partiel
-    if os.path.exists(local_model_path):
-        try:
-            return joblib.load(local_model_path)
-        except Exception:
-            print("⚠️ Modèle local corrompu, re-téléchargement")
-            os.remove(local_model_path)
-
-    connect_str = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
-
-    blob_service = BlobServiceClient.from_connection_string(connect_str)
-    blob_client = blob_service.get_blob_client(
-        container=MODEL_CONTAINER,
-        blob=MODEL_BLOB_NAME
-    )
-
-    print("⬇️ Téléchargement du modèle depuis Azure Blob…")
-    data = blob_client.download_blob().readall()
-
-    with open(local_model_path, "wb") as f:
-        f.write(data)
-
-    return joblib.load(local_model_path)
-
-def get_model_black():
-    global _model_black
-    if _model_black is None:
-        print("⏳ Chargement du modèle IA…")
-        _model_black = load_model_from_blob()
-        print("✅ Modèle IA prêt")
-    return _model_black
-modelblack = get_model_black()
-LIST_FILE = "listes.pkl"
-
-if os.path.exists(LIST_FILE):
-    dflist = joblib.load(LIST_FILE)
-else:
-    dflist = pd.DataFrame()
+dflist = load_model_from_blob("listes.pkl", "data", blob_service)
+print("TF:", tf.__version__)
+print("Keras:", keras.__version__)
+print("Joblib:", joblib.__version__)
+#modelwhite = joblib.load("modelblanctransfert2.pkl")
 TAILLE = 10
 tokens = [[None for _ in range(TAILLE)] for _ in range(TAILLE)]
 newtokens = [[None for _ in range(TAILLE)] for _ in range(TAILLE)]
@@ -88,6 +142,8 @@ cells = [[None for _ in range(TAILLE)] for _ in range(TAILLE)]
 state = {
     'rows': None,
     'cols': None,
+    'rowclignotant': None,
+    'colclignotant': None,
     'caseactive': False,
     'type' : None,
     'eat' : None,
@@ -102,6 +158,9 @@ state = {
     'nombresaut': 0,
     'gameover': ' ',
     'nbpion' : 0,
+    'etat': 0,
+    'mode': 0,
+    'couleurpartie':None,
     'nbpionsadverse' : 0,
     'timefinal' : None,
     'tabeatingsaut' : [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)],
@@ -114,7 +173,10 @@ state['ndf']['typedeplacement'] = ' '
 ndfdataframe = pd.DataFrame()
 
 def update_best_results():
-    dflist = joblib.load("listes.pkl")
+    dflist = load_model_from_blob("listes.pkl", "data", blob_service)
+   
+    # 🎯 FILTRAGE PAR MODE
+    dflist = dflist[dflist['mode'] == state['mode']]
 
     results_column.clear()
 
@@ -130,7 +192,14 @@ def update_best_results():
         ).style(
             'font-size: 16px;'
         ).move(results_column)
-        
+
+def retour_menu():
+    # optionnel : remettre des états comme tu veux
+    state['etat'] = 0      # ou 1 si tu préfères
+    state['mode'] = None   # optionnel
+    reset_game()
+    game_container.set_visibility(False)
+    menu_container.set_visibility(True)
 def get_top_10(dflist):
     if dflist.empty:
         return dflist
@@ -146,6 +215,26 @@ def get_top_10(dflist):
         .reset_index(drop=True)
     )
 
+def recherchedame(tokens):
+    black = False
+    white = False
+
+    for ligne in tokens:
+        for token in ligne:
+            if token is not None:
+                classes = token._classes
+
+                if "dame" in classes:
+                    if "black" in classes:
+                        print('damenoir')
+                        black = True
+                    if "white" in classes:
+                        print('dameblanche')
+                        white = True
+
+    return white, black
+
+    return white, black
 def time_to_seconds(t):
     m, s = t.split(':')
     return int(m) * 60 + int(s)
@@ -246,6 +335,7 @@ def reset_game():
     
 def reset_state():
     global tokens, state
+    mode_actuel = state['mode'] 
     TAILLE = 10
     tokens = [[None for _ in range(TAILLE)] for _ in range(TAILLE)]
     tokens = [[None for _ in range(TAILLE)] for _ in range(TAILLE)]
@@ -253,6 +343,8 @@ def reset_state():
     state = {
     'rows': None,
     'cols': None,
+    'rowclignotant': None,
+    'colclignotant': None,
     'caseactive': False,
     'type' : None,
     'eat' : None,
@@ -268,6 +360,8 @@ def reset_state():
     'nbpion' : 0,
     'nbpionsadverse' : 0,
     'gameover': ' ',
+    'couleurpartie':' ',
+    'mode':mode_actuel,
     'tabeatingsaut' : [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)],
     'poslegal' : [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)],
     'deslegal' : [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)],
@@ -369,8 +463,11 @@ def comptegame(tokens, joueur):
       pionadverse = blancs
   return pionjoueur, pionadverse
     
-def fin_de_partie(tokens, ndfdataframe, joueur):
-    final_time = get_elapsed_time()  
+def fin_de_partie(tokens, ndfdataframe, joueur, partiia):
+    if partiia == 0:
+            final_time = get_elapsed_time()  
+    else:
+            final_time = None
     ndfdataframe = ndfdataframe.copy()
     pions, pionsadverse = comptegame(tokens, joueur)
     if joueur == 'white':
@@ -381,51 +478,58 @@ def fin_de_partie(tokens, ndfdataframe, joueur):
         blancs = pionsadverse
         
     if blancs == 0 or state['gameover'] == 'white':
+        if state['mode']== 4:
+            reset_game()
+            return 'noir', final_time
       
         ndfdataframe['vainqueur'] = ndfdataframe['joueur'].map({
     'black': 1,
     'white': 0
 })
             
-        if os.path.exists("dataia3.pkl"):
-            df = pd.read_pickle("dataia3.pkl")
+        df = load_model_from_blob("newdataiadames2.pkl", "data", blob_service)
+        if df:
             max_partie = df['partie'].max()
             ndfdataframe['partie'] = max_partie + 1
             df = pd.concat(
             [df, ndfdataframe],
              ignore_index=True
              )
-            df.to_pickle("dataia3.pkl")
+            save_model_to_blob(df, "newdataiadames2.pkl", "data", blob_service)
             reset_game()
             return 'noir', final_time
 
         else:
             ndfdataframe['partie'] = 1
-            ndfdataframe.to_pickle("dataia3.pkl")
+            save_model_to_blob(df, "newdataiadames2.pkl", "data", blob_service)
             reset_game()
             return 'noir', final_time
     if noirs == 0 or state['gameover'] == 'black':
+        if state['mode']== 4:
+            reset_game()
+            return 'blanc', final_time
         ndfdataframe['vainqueur'] = ndfdataframe['joueur'].map({
     'black': 1,
     'white': 0
 })
-        if os.path.exists("dataia3.pkl"):
-            df = pd.read_pickle("dataia3.pkl")
+        df = load_model_from_blob("newdataiadames2.pkl", "data", blob_service)
+        if df:
             max_partie = df['partie'].max()
             ndfdataframe['partie'] = max_partie + 1
             df = pd.concat(
             [df, ndfdataframe],
              ignore_index=True
-             )
-            df.to_pickle("dataia3.pkl")
+            )
+            save_model_to_blob(df, "newdataiadames2.pkl", "data", blob_service)
             reset_game()
             return 'blanc', final_time
 
         else:
             ndfdataframe['partie'] = 1
-            ndfdataframe.to_pickle("dataia3.pkl")
+            save_model_to_blob(ndfdataframe, "newdataiadames2.pkl", "data", blob_service)
             reset_game()
             return 'blanc', final_time
+
         
     return None, final_time  # la partie continue
 
@@ -459,7 +563,7 @@ def enchainement_dame_noire(token, src_row, src_col):
         tokens[mid_row][mid_col] = None
 
         token.move(cells[dst_row][dst_col])
-        tokens[dst_row][dst_col] = token
+        tens[dst_row][dst_col] = token
 
         cur_row, cur_col = dst_row, dst_col
         state['ndf']['row'] = cur_row
@@ -520,11 +624,187 @@ def enchainement_dame(
 
         nombresaut += 1
 
+def max_captures_dame(row, col, board, couleur):
+    captures = dame_captures_logic(row, col, board, couleur)
+    if not captures:
+        return 0
 
+    best = 0
 
+    for dst_row, dst_col, (mid_row, mid_col) in captures:
+        new_board = copy_board(board)
 
+        new_board[row][col] = None
+        new_board[mid_row][mid_col] = None
+        new_board[dst_row][dst_col] = ('dame', couleur)
 
+        score = 1 + max_captures_dame(
+            dst_row, dst_col, new_board, couleur
+        )
 
+        best = max(best, score)
+
+    return best
+
+def dame_captures_logic(row, col, board, couleur):
+    """
+    Retourne toutes les captures possibles pour une dame à (row, col).
+    Format retour: [(dst_row, dst_col, (mid_row, mid_col)), ...]
+    où (mid_row, mid_col) est la pièce ennemie capturée.
+    """
+    ennemi = 'white' if couleur == 'black' else 'black'
+    captures = []
+
+    directions = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+
+    for dr, dc in directions:
+        r = row + dr
+        c = col + dc
+
+        found_enemy = False
+        enemy_pos = None
+
+        # On avance sur la diagonale
+        while 0 <= r < TAILLE and 0 <= c < TAILLE:
+            cell = board[r][c]
+
+            if cell is None:
+                # Case vide
+                if found_enemy:
+                    # Si on a déjà vu 1 ennemi, toute case vide après est une destination possible
+                    mid_row, mid_col = enemy_pos
+                    captures.append((r, c, (mid_row, mid_col)))
+                # sinon on continue à chercher un ennemi
+                r += dr
+                c += dc
+                continue
+
+            # Case occupée
+            kind, color = cell
+
+            if color == couleur:
+                # Bloqué par une pièce amie
+                break
+
+            # Pièce ennemie
+            if not found_enemy:
+                found_enemy = True
+                enemy_pos = (r, c)
+                r += dr
+                c += dc
+                continue
+            else:
+                # Deux ennemis sur la même diagonale sans case vide entre → impossible
+                break
+
+    return captures
+
+def max_captures_pion(row, col, board, couleur):
+    captures = pion_captures_logic(row, col, board, couleur)
+
+    if not captures:
+        return 0
+
+    best = 0
+
+    for dst_row, dst_col, (mid_row, mid_col) in captures:
+        # copie simple du plateau logique
+        new_board = [r[:] for r in board]
+
+        new_board[row][col] = None
+        new_board[mid_row][mid_col] = None
+        new_board[dst_row][dst_col] = ('pion', couleur)
+
+        score = 1 + max_captures_pion(
+            dst_row, dst_col, new_board, couleur
+        )
+
+        best = max(best, score)
+
+    return best
+
+def pion_captures_logic(row, col, board, couleur):
+    captures = []
+
+    if couleur == 'black':
+        dir_row = 2
+        ennemi = 'white'
+    else:
+        dir_row = -2
+        ennemi = 'black'
+
+    for dcol in (-2, 2):
+        dst_row = row + dir_row
+        dst_col = col + dcol
+
+        if not (0 <= dst_row < TAILLE and 0 <= dst_col < TAILLE):
+            continue
+
+        mid_row = (row + dst_row) // 2
+        mid_col = (col + dst_col) // 2
+
+        if (
+            board[mid_row][mid_col] == ('pion', ennemi)
+            and board[dst_row][dst_col] is None
+        ):
+            captures.append((dst_row, dst_col, (mid_row, mid_col)))
+
+    return captures
+
+def max_captures_global(tokens, couleur):
+    board = build_logic_board(tokens)
+    max_global = 0
+
+    for r in range(TAILLE):
+        for c in range(TAILLE):
+            piece = board[r][c]
+            if not piece or piece[1] != couleur:
+                continue
+
+            kind, _ = piece
+
+            if kind == 'pion':
+                score = max_captures_pion(r, c, board, couleur)
+            else:
+                score = max_captures_dame(r, c, board, couleur)
+
+            max_global = max(max_global, score)
+
+    return max_global
+
+def build_logic_board(tokens):
+    board = [[None for _ in range(TAILLE)] for _ in range(TAILLE)]
+
+    for r in range(TAILLE):
+        for c in range(TAILLE):
+            token = tokens[r][c]
+            if token is None:
+                continue
+
+            classes = token._classes  # set de classes
+
+            # couleur
+            if 'black' in classes:
+                couleur = 'black'
+            elif 'white' in classes:
+                couleur = 'white'
+            else:
+                continue  # pas une piece reconnue
+
+            # type de piece
+            if 'dame' in classes:
+                kind = 'dame'
+            elif 'token' in classes:
+                kind = 'pion'
+            else:
+                continue
+
+            board[r][c] = (kind, couleur)
+
+    return board
+
+def copy_board(board):
+    return [row[:] for row in board]
 
 
 def deplacements_possibles(tokens, couleur):
@@ -977,8 +1257,163 @@ def lookeating(color, colormange, tab):
                 s = s + 1
 
 
+def looksefairemanger(color, colormange, tab):
+    for row, ligne in enumerate(tokens):
+      for col, token in enumerate(ligne):
+        # on ne garde que les pions blancs
+        if token is None or color not in token._classes:
+            continue
+        if 'dame' not in token._classes:
+         if color == 'white':
+                 new_row = row - 2
+                 if new_row < 0:
+                     continue
+         if color == 'black':
+                 new_row = row + 2
+                 if new_row > 9:
+                     continue
+        #faire les vérif à gauche
+         if color == 'white':
+             new_col1 = col - 2
+         if color == 'black':
+             new_col1 = col + 2
+         if new_col1 >= 0 and new_col1 <= 9:
+            
+            # verifier que les cellules apres le pion à manger est vide
+            if tokens[new_row][new_col1] is None:
+                # regarder sil y a bien un puion noir à manger lors du saut
+                
+                mid_row = (new_row + row) // 2
+                mid_col1 = (new_col1 + col) // 2
+                mid_token1 = tokens[mid_row][mid_col1]
+                if mid_token1 is not None and colormange in mid_token1._classes:
+                   tab[0].append(mid_row)
+                   tab[1].append(mid_col1)
+                   
+                    
+                    
+
+        #faire les vérif à droite
+         if color == 'white':
+              new_col2 = col + 2
+         if color == 'black':
+              new_col2 = col - 2    
+
+         if new_col2 <= 9 and new_col2 >= 0:
+            
+            # verifier que les cellules apres le pion à manger est vide
+            if tokens[new_row][new_col2] is None:
+                
+                # regarder sil y a bien un puion noir à manger lors du saut
+                mid_row = (new_row + row) // 2
+                mid_col2 = (new_col2 + col) // 2
+                mid_token2 = tokens[mid_row][mid_col2]
+                if mid_token2 is not None and colormange in mid_token2._classes:
+                        tab[0].append(mid_row)
+                        tab[1].append(mid_col2)
+                    
+        else:
+            #pour les dames y a 4 directions et y a plusieur cellule a regarder
+            #verif en haut 
+            
+            tabrow1 = row - 0
+            s = 2
+            while s <= tabrow1:
+                #verif a gauche
+                new_row = row - s
+                new_col = col - s
+                if new_col >= 0 and new_row >= 0:
+                       if tokens[new_row][new_col] is None:
+                        #vérifier qu'il n'y a pas de pion dans le saut(exit celui qui est mangé)
+                        nombre = s - 2
+                        verif = 1
+                        while nombre > 0:
+                            rowv = row - nombre
+                            colv = col - nombre
+                            if tokens[rowv][colv] is not None: 
+                                verif = 0
+                            nombre = nombre - 1
+                        mid_row = new_row + 1
+                        mid_col = new_col + 1
+                        mid_token = tokens[mid_row][mid_col]
+                        if mid_token is not None and colormange in mid_token._classes and verif == 1:
+                                 tab[0].append(mid_row)
+                                 tab[1].append(mid_col)
+                             
+                #verif à droite
+                new_row = row - s
+                new_col = col + s
+                if new_col <= 9 and new_row >= 0:
+                       if tokens[new_row][new_col] is None:
+                        #vérifier qu'il n'y a pas de pion dans le saut(exit celui qui est mangé)
+                        nombre = s - 2
+                        verif = 1
+                        while nombre > 0:
+                            rowv = row - nombre
+                            colv = col + nombre
+                            if tokens[rowv][colv] is not None: 
+                                verif = 0 
+                            nombre = nombre - 1
+                        mid_row = new_row + 1
+                        mid_col = new_col - 1
+                        mid_token = tokens[mid_row][mid_col]
+                        if mid_token is not None and colormange in mid_token._classes and verif == 1:
+                                 tab[0].append(mid_row)
+                                 tab[1].append(mid_col)
+                             
+                s = s + 1
+            #verif en bas    
+            tabrow2 = 9 - row
+            s = 2
+            
+            while s <= tabrow2:
+                #verif a gauche
+                new_row = row + s
+                new_col = col - s
+                if new_col >= 0 and new_row <= 9:
+                       if tokens[new_row][new_col] is None:
+                        #vérifier qu'il n'y a pas de pion dans le saut(exit celui qui est mangé)
+                        nombre = s - 2
+                        verif = 1
+                        while nombre > 0:
+                            rowv = row + nombre
+                            colv = col - nombre
+                            if tokens[rowv][colv] is not None: 
+                                verif = 0
+                            nombre = nombre - 1
+                        mid_row = new_row - 1
+                        mid_col = new_col + 1
+                        mid_token = tokens[mid_row][mid_col]
+                        if mid_token is not None and colormange in mid_token._classes and verif == 1:
+                             tab[0].append(mid_row)
+                             tab[1].append(mid_col)
+                #verif à droite
+                new_row = row + s
+                new_col = col + s
+                if new_col <= 9 and new_row <= 9:
+                       if tokens[new_row][new_col] is None:
+                        #vérifier qu'il n'y a pas de pion dans le saut(exit celui qui est mangé)
+                        nombre = s - 2
+                        verif = 1
+                        while nombre > 0:
+                            rowv = row + nombre
+                            colv = col + nombre
+                            if tokens[rowv][colv] is not None: 
+                                verif = 0
+                            nombre = nombre - 1
+                        mid_row = new_row - 1
+                        mid_col = new_col - 1
+                        mid_token = tokens[mid_row][mid_col]
+                        if mid_token is not None and colormange in mid_token._classes and verif == 1:
+                             tab[0].append(mid_row)
+                             tab[1].append(mid_col)
+                                      
+                s = s + 1
+
+    return tab
+
 def partiia():
-    NB_PARTIES = 60
+    NB_PARTIES = 500
 
     for i in range(NB_PARTIES):
       reset_game()
@@ -999,7 +1434,7 @@ def partiia():
         if aucun_depart and state['eat'] != 1:
               state['gameover'] = joueur
         else:
-              move_black_ai_deep_learning(joueur, adversaire)
+              move_black_ai_deep_learningia(joueur, adversaire)
         state['ndf']['dataaprescoup'] = data(tokens)
         global ndfdataframe
         ndfdataframe = pd.concat(
@@ -1007,8 +1442,8 @@ def partiia():
     ignore_index=True
 )
         state['ndf'] = pd.Series(dtype=object)
-        resultat = fin_de_partie(tokens, ndfdataframe, joueur)
-        
+        resultat, timefinal = fin_de_partie(tokens, ndfdataframe, joueur, 1)
+        print(resultat)
         if resultat == 'noir':
            ndfdataframe = pd.DataFrame()
            show_message('Victoire des noirs 🖤')
@@ -1017,7 +1452,7 @@ def partiia():
            show_message('Victoire des blancs 🤍') 
            ndfdataframe = pd.DataFrame()
            break
-        if state['coup'] > 150:
+        if state['coup'] > 250:
            ndfdataframe = pd.DataFrame()
            break
         if joueur == 'black':
@@ -1029,23 +1464,115 @@ def partiia():
         
 
 
+def clicmode(r, c):
+    if state['mode'] == 4:
+        partiadeux(r, c)
+    else:
+        cell_clic(r, c)
     
-
-    
-     
-
+def partiadeux(r, c):
+    if state['rowclignotant']:
+       rowc = int(state['rowclignotant'])  
+       colc = int(state['colclignotant'])  
+       if tokens[rowc][colc] is not None: 
+             tokens[rowc][colc].classes(remove="anim")
+             tokens[rowc][colc].classes(remove="animnoir")
+    if state['couleurpartie'] =='black':
+        couleur = 'black'
+        couleurenemy = 'white'
+    else:
+        couleur = 'white'
+        couleurenemy = 'black'
+    global start_time, timer_started
+    if not timer_started:
+        start_time = time.time()
+        timer_started = True
+    lookeating(couleur, couleurenemy, state['tabeating'])
+    if state['caseactive'] == False:
+        selectcase(r, c, couleurenemy, couleur)
+        return
+    if state['caseactive'] == True:
+        state['rowsaut'] = ' '
+        state['colsaut'] = ' '
+        if state['eatsaut'] != 1:
+            state['coup'] += 1
+            state['ndf']['coup'] = state['coup']
+            state['ndf']['dataencour'] = data(tokens)
+            state['ndf']['joueur'] = 'blanc'
+            noirs, blancs = comptegame(tokens, couleur)
+            state['ndf']['poslegal'], state['ndf']['deslegal'] = deplacements_possibles(tokens, couleur)
+            if uniquement_false(state['ndf']['deslegal']) and state['eat'] != 1:
+              state['gameover'] = couleur
+            state['ndf']['nbpion'] = blancs
+            state['ndf']['nbpionsadverse'] = noirs
+        if state['gameover'] != couleur:
+            movejetons(r, c, tokens, couleur, couleurenemy)
+        state['tabeating'] = [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)]
+        lookeating(couleur, couleurenemy, state['tabeating'])
+        state['eatsaut'] = 0
+        for row, ligne in enumerate(state['tabeating']):
+           for col, cell in enumerate(ligne):
+              if cell.strip() != '':
+                   if row == state['rowsaut'] and col == state['colsaut'] and 'select' in cell:
+                       if state['transformation'] == 0:
+                           print('eatsaut')
+                           state['eatsaut'] = 1
+            
+        
+    if state['caseactive'] == True and (state['eatsaut'] == 0 or state['transformation'] == 1):
+        state['ndf']['poslegal'], state['ndf']['deslegal'] = deplacements_possibles(tokens, couleurenemy)
+        if uniquement_false(state['ndf']['deslegal']):
+             state['gameover'] = couleurenemy
+             
+        state['ndf']['poslegal'], state['ndf']['deslegal'] = deplacements_possibles(tokens, couleur)
+        if uniquement_false(state['ndf']['deslegal']):
+             state['gameover'] = couleur
+        noirs, blancs = comptegame(tokens, couleurenemy)
+        ndfdataframe = pd.DataFrame()
+        resultat, timefinal = fin_de_partie(tokens, ndfdataframe, couleurenemy, 0)
+        state['timefinal'] = timefinal
+        if resultat == 'noir':
+            ndfdataframe = pd.DataFrame()
+            show_message(f'Victoire des noirs 🖤 en {timefinal}') 
+            name_dialog.open()
+        elif resultat == 'blanc':
+             ndfdataframe = pd.DataFrame()
+             show_message(f'Victoire des blancs 🤍 en {timefinal}') 
+             name_dialog.open()
+     # reset état
+        state['rows'] = None
+        state['cols'] = None
+        state['caseactive'] = False
+        state['type'] = None
+        state['eat'] = None
+        state['tabeating'] = [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)]     
+        if state['couleurpartie'] == 'black':
+          state['couleurpartie'] = 'white'
+          show_message(f'C est le tour des blanc') 
+        else:
+          state['couleurpartie'] = 'black'
+          show_message(f'C est le tour des noir') 
 
 
 
 
 def cell_clic(r, c):
     global start_time, timer_started
+    
+    
+    if state['rowclignotant']:
+       rowc = int(state['rowclignotant'])  
+       colc = int(state['colclignotant'])  
+       if tokens[rowc][colc] is not None: 
+             tokens[rowc][colc].classes(remove="anim")
+             tokens[rowc][colc].classes(remove="animnoir")
+       
     if not timer_started:
         start_time = time.time()
         timer_started = True
     lookeating('white', 'black', state['tabeating'])
     if state['caseactive'] == False:
-        selectcase(r, c)
+        selectcase(r, c, 'black', 'white')
         return
     if state['caseactive'] == True:
         state['rowsaut'] = ' '
@@ -1059,10 +1586,8 @@ def cell_clic(r, c):
             state['ndf']['poslegal'], state['ndf']['deslegal'] = deplacements_possibles(tokens, 'white')
             if uniquement_false(state['ndf']['deslegal']) and state['eat'] != 1:
               state['gameover'] = 'white'
-            state['ndf']['nbpion'] = blancs
-            state['ndf']['nbpionsadverse'] = noirs
         if state['gameover'] != 'white':
-            movejetons(r, c, tokens)
+            movejetons(r, c, tokens, 'white', 'black')
     state['tabeating'] = [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)]
     lookeating('white', 'black', state['tabeating'])
     state['eatsaut'] = 0
@@ -1070,9 +1595,10 @@ def cell_clic(r, c):
            for col, cell in enumerate(ligne):
               if cell.strip() != '':
                    if row == state['rowsaut'] and col == state['colsaut'] and 'select' in cell:
-                       state['eatsaut'] = 1
+                       if state['transformation'] == 0:
+                           state['eatsaut'] = 1
     
-    if state['eatsaut'] == 1 and state['transformation'] == 0:
+    if state['eatsaut'] == 1 :
             state['nombresaut'] += 1
             state['ndf']['typedeplacement'] = 'saut' 
             state['ndf']['nombresaut'] = state['nombresaut']
@@ -1113,17 +1639,22 @@ def cell_clic(r, c):
         if uniquement_false(state['ndf']['deslegal']):
              state['gameover'] = 'black'
              
-        
+        state['ndf']['poslegal'], state['ndf']['deslegal'] = deplacements_possibles(tokens, 'white')
+        if uniquement_false(state['ndf']['deslegal']):
+             state['gameover'] = 'white'
         noirs, blancs = comptegame(tokens, 'black')
         if noirs != 0 and state['gameover'] != 'black' and state['gameover'] != 'white':
                  move_black_ai_deep_learning('black', 'white')
+                 state['ndf']['poslegal'], state['ndf']['deslegal'] = deplacements_possibles(tokens, 'white')
+                 if uniquement_false(state['ndf']['deslegal']):
+                       state['gameover'] = 'white'
                  state['ndf']['dataaprescoup'] = data(tokens)
                  ndfdataframe = pd.concat(
                  [ndfdataframe, state['ndf'].to_frame().T],
                  ignore_index=True
 )
         state['ndf'] = pd.Series(dtype=object)
-    resultat, timefinal = fin_de_partie(tokens, ndfdataframe, 'black')
+    resultat, timefinal = fin_de_partie(tokens, ndfdataframe, 'black', 0)
     state['timefinal'] = timefinal
     if resultat == 'noir':
        ndfdataframe = pd.DataFrame()
@@ -1140,6 +1671,7 @@ def cell_clic(r, c):
     state['type'] = None
     state['eat'] = None
     state['tabeating'] = [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)]
+    
 
    
 def uniquement_false(deslegal):
@@ -1148,7 +1680,7 @@ def uniquement_false(deslegal):
         for row in deslegal
         for cell in row
     )        
-def selectcase(row, col):
+def selectcase(row, col, couleurenemy, couleur):
       token = tokens[row][col]
       tabmang = 0
       state['eat'] = 0
@@ -1162,7 +1694,7 @@ def selectcase(row, col):
 
       if state['eatsaut'] == 1 :
           if row != state['rowsaut'] or col != state['colsaut']:
-              show_message(f"Vous devez continuer de manger avec row = {state['rowsaut']} col = {state['colsaut']}")
+              show_message(f'Vous devez continuer de manger avec row = {state['rowsaut']} col =  {state['colsaut']}')
               state['rows'] = None
               state['cols'] = None
               state['caseactive'] = False
@@ -1181,14 +1713,14 @@ def selectcase(row, col):
          show_message('Vous devez obligatoirement manger !')
          return          
                    
-      if 'black' in token._classes:
+      if couleurenemy in token._classes:
         state['rows'] = None
         state['cols'] = None
         state['caseactive'] = False
         state['type'] = None
         state['eat'] = None
         state['tabeating'] = [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)]
-        show_message('Vous etes les blancs !')
+        show_message(f'Vous etes les {couleur} !')
         return
       if 'dame' in token._classes:
           state['type'] = 'dame'
@@ -1196,12 +1728,23 @@ def selectcase(row, col):
           state['type'] = 'pion'
       state['rows'] = row 
       state['cols'] = col
+      state['rowclignotant'] = row 
+      state['colclignotant'] = col
       state['caseactive'] = True
-   
-def movejetons(row, col, tab):
+      if couleur == 'white':
+          print('couleur')
+          print(couleur)
+          tokens[state['rowclignotant']][state['colclignotant']].classes(add="anim")
+      if couleur == 'black':
+          print('couleur')
+          print(couleur)
+          tokens[state['rowclignotant']][state['colclignotant']].classes(add="animnoir")
+
+
+def movejetons(row, col, tab, couleur, couleurenemy):
     state['transformation'] = 0
 
-    if tab[row][col] is not None:
+    if tab[row][col] is not None and state['eat'] == 0:
         state['rows'] = None
         state['cols'] = None
         state['caseactive'] = False
@@ -1216,7 +1759,7 @@ def movejetons(row, col, tab):
     token = tab[src_row][src_col]
    
         
-    if token is None:
+    if token is None :
         show_message('La case sélectionnée n existe pas !')
         state['rows'] = None
         state['cols'] = None
@@ -1228,12 +1771,13 @@ def movejetons(row, col, tab):
 
     if state['eat'] == 1:
         #regarder dans le tableau si la case active est une dame ou un pion et quelle est le type de deplacement
+        print('saut')
         if 'pionselect' in state['tabeating'][src_row][src_col]: 
             if 'prise pion' in state['tabeating'][row][col] and (('gauche' in state['tabeating'][src_row][src_col] and 'gauche' in state['tabeating'][row][col]) or ('droite' in state['tabeating'][src_row][src_col] and 'droite' in state['tabeating'][row][col])):
                 mid_row = (src_row + row) // 2
                 mid_col = (src_col + col) // 2
                 mid_token = tokens[mid_row][mid_col]
-                if mid_token is not None and 'black' in mid_token._classes:
+                if mid_token is not None and couleurenemy in mid_token._classes:
                     mid_token.delete()
                     tab[mid_row][mid_col] = None
                    
@@ -1256,13 +1800,15 @@ def movejetons(row, col, tab):
                 state['eat'] = None
                 state['tabeating'] = [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)]
                 return 
+            
+                
         if 'dameselect' in state['tabeating'][src_row][src_col]: 
             manger = 0
             if 'prise dame' in state['tabeating'][row][col] and ('basgauche' in state['tabeating'][src_row][src_col] and 'basgauche' in state['tabeating'][row][col]):
                mid_row = row - 1
                mid_col = col + 1
                mid_token = tab[mid_row][mid_col] 
-               if mid_token is not None and 'black' in mid_token._classes:
+               if mid_token is not None and couleurenemy in mid_token._classes:
                     mid_token.delete()
                     tab[mid_row][mid_col] = None
                     manger = 1
@@ -1273,7 +1819,7 @@ def movejetons(row, col, tab):
                mid_row = row - 1
                mid_col = col - 1
                mid_token = tab[mid_row][mid_col] 
-               if mid_token is not None and 'black' in mid_token._classes:
+               if mid_token is not None and couleurenemy in mid_token._classes:
                     mid_token.delete()
                     tab[mid_row][mid_col] = None 
                     manger = 1
@@ -1284,7 +1830,7 @@ def movejetons(row, col, tab):
                mid_row = row + 1
                mid_col = col - 1
                mid_token = tab[mid_row][mid_col] 
-               if mid_token is not None and 'black' in mid_token._classes:
+               if mid_token is not None and couleurenemy in mid_token._classes:
                     mid_token.delete()
                     tab[mid_row][mid_col] = None  
                     manger = 1
@@ -1296,12 +1842,13 @@ def movejetons(row, col, tab):
                 mid_row = row + 1
                 mid_col = col + 1
                 mid_token = tab[mid_row][mid_col]
-                if mid_token is not None and 'black' in mid_token._classes:
+                if mid_token is not None and couleurenemy in mid_token._classes:
                     mid_token.delete()
                     tab[mid_row][mid_col] = None
                     manger = 1
                     state['rowsaut'] = row
                     state['colsaut'] = col
+           
             if manger == 0:
                 show_message('Vous devez obligatoirement manger !')
                 state['rows'] = None
@@ -1311,20 +1858,34 @@ def movejetons(row, col, tab):
                 state['eat'] = None
                 state['tabeating'] = [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)]
                 return 
-                
-            dameblanche = creer_dame_blanche()
-            dameblanche.classes(remove='selected')
-            # retirer le jeton de l’ancienne case
-            tab[src_row][src_col] = None
-            cells[src_row][src_col].clear()
-            # déplacer visuellement le jeton
-            dameblanche.move(cells[row][col])
-            tab[row][col] = dameblanche    
+
+            if couleur == 'white':
+              dameblanche = creer_dame_blanche()
+              dameblanche.classes(remove='selected')
+              # retirer le jeton de l’ancienne case
+              tab[src_row][src_col] = None
+              cells[src_row][src_col].clear()
+              # déplacer visuellement le jeton
+              dameblanche.move(cells[row][col])
+              tab[row][col] = dameblanche   
+            else:
+              damenoir = creer_dame_noire()
+              damenoir.classes(remove='selected')
+              # retirer le jeton de l’ancienne case
+              tab[src_row][src_col] = None
+              cells[src_row][src_col].clear()
+              # déplacer visuellement le jeton
+              damenoir.move(cells[row][col])
+              tab[row][col] = damenoir    
         
         
                   
-    if typejeton == 'pion' and state['eat'] == 0:                                                    
-      if (row == src_row - 1) and (col == src_col + 1 or col == src_col - 1):
+    if typejeton == 'pion' and state['eat'] == 0:  
+      if couleur == 'white':
+          deplacement = - 1
+      else:
+          deplacement =  1
+      if (row == src_row + deplacement) and (col == src_col + 1 or col == src_col - 1):
           # retirer la classe de sélection de l’ancienne position
           token.classes(remove='selected')
           # retirer le jeton de l’ancienne case
@@ -1342,34 +1903,76 @@ def movejetons(row, col, tab):
          state['eat'] = None
          state['tabeating'] = [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)]
          return  # impossible de se deplacer comme ça
-          
+      
+              
     if typejeton == 'dame' and state['eat'] == 0: 
     
         #regarder si le deplacement est autorisé
         if abs(row - src_row) == abs(col - src_col):
-            # retirer la classe de sélection de l’ancienne position
-            dameblanche = creer_dame_blanche()
-            dameblanche.classes(remove='selected')
-            # retirer le jeton de l’ancienne case
-            tab[src_row][src_col] = None
-            cells[src_row][src_col].clear()
-             # déplacer visuellement le jeton
-            dameblanche.move(cells[row][col])
-            tab[row][col] = dameblanche    
+            if couleur == 'white':
+              # retirer la classe de sélection de l’ancienne position
+              
+              dameblanche = creer_dame_blanche()
+              dameblanche.classes(remove='selected')
                 
-                
+              
+
+              dameblanche.move(cells[row][col])
+              
+              
+              # retirer le jeton de l’ancienne case
+              tab[src_row][src_col] = None
+              cells[src_row][src_col].clear()
             
+              
+              tab[row][col] = dameblanche   
+            else:
+              # retirer la classe de sélection de l’ancienne position
+              damenoir = creer_dame_noire()
+              damenoir.classes(remove='selected')
+              # retirer le jeton de l’ancienne case
+             
+
+              damenoir.move(cells[row][col])
+             
+              tab[src_row][src_col] = None
+              cells[src_row][src_col].clear()
+               # déplacer visuellement le jeton
+              
+              tab[row][col] = damenoir    
+        else:
+            show_message('Déplacement interdit !')
+            state['rows'] = None
+            state['cols'] = None
+            state['caseactive'] = False
+            state['type'] = None
+            state['eat'] = None
+            state['tabeating'] = [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)]
+            return  # impossible de se deplacer comme ça
+                
+                
+   # transformation en dame
+    if typejeton == 'pion':
+      if couleur == 'white':
+          if row == 0:
+             print('transformationrow0')
+             dameblanche = creer_dame_blanche()
+             tab[row][col].delete()
+             dameblanche.move(cells[row][col])
+             tab[row][col] = dameblanche
+             state['transformation'] = 1
+      else:
+          if row == 9:
+             print('transformationrow9')
+             damenoir = creer_dame_noire()
+             tab[row][col].delete()
+             damenoir.move(cells[row][col])
+             tab[row][col] = damenoir
+             state['transformation'] = 1               
         
     
 
-    # transformation en dame
     
-    if row == 0:
-       dameblanche = creer_dame_blanche()
-       tab[row][col].delete()
-       dameblanche.move(cells[row][col])
-       tab[row][col] = dameblanche
-       state['transformation'] = 1
 
    
 def can_move_black(src_row, src_col, dst_row, dst_col, tab):
@@ -1391,8 +1994,8 @@ def can_move_black(src_row, src_col, dst_row, dst_col, tab):
 
 
 
-
 def move_black_ai_deep_learning(couleur, couleurenemy):
+    global tokens
     state['tabeating'] = [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)]
     state['ndf']['transformation'] = 0
     lookeating(couleur, couleurenemy, state['tabeating'])
@@ -1409,31 +2012,113 @@ def move_black_ai_deep_learning(couleur, couleurenemy):
 
             # exemple : prise vers le bas pion
             if 'pion' in cell:
-              state['ndf']['type'] = 'pion'
-              enchainement_pion(token, src_row, src_col, tokens, couleur)
-              
-              return
+                board = build_logic_board(tokens)
+                print("=== BOARD LOGIQUE ===")
+                for r in range(TAILLE):
+                   for c in range(TAILLE):
+                      if board[r][c]:
+                          print(r, c, board[r][c])
+                max_local = max_captures_pion(src_row, src_col, board, couleur)
+                max_global = max_captures_global(tokens, couleur)
+                
+                # ❌ ce pion ne fait pas le meilleur coup possible
+                if max_local < max_global:
+                   continue
+                print('coupchoisi')
+                print('max_localpion')
+                print(max_local)
+                print('max_global')
+                print(max_global)
+                print(src_row)
+                print(src_col)
+                # ✅ coup légal
+                state['ndf']['type'] = 'pion'
+                enchainement_pion(token, src_row, src_col, tokens, couleur)
+                return
                 
 
             if 'dame' in token._classes:
-                state['ndf']['type'] = 'dame'
-                enchainement_dame(token, src_row, src_col, couleur)
-                
-                return
+                 board = build_logic_board(tokens)
+                 max_local = max_captures_dame(src_row, src_col, board, couleur)
+                 max_global = max_captures_global(tokens, couleur)
+                 if max_local < max_global:
+                      continue  
+                 print('coupchoisi')
+                 print('max_localdame')
+                 print(max_local)
+                 print('max_global')
+                 print(max_global)
+                 print(src_row)
+                 print(src_col)
+                 state['ndf']['type'] = 'dame'
+                 enchainement_dame(token, src_row, src_col, couleur)
+                 return
                                    
     else:
       state['ndf']['typedeplacement'] = 'deplacement'
-      newtokens = tokens.copy()   # ← avec ()
-      row, col, new_row, new_col = nevaluationdeplacement(newtokens, couleur)
-      token = tokens[row][col]
-      tokens[row][col] = None
-      token.move(cells[new_row][new_col])
-      tokens[new_row][new_col] = token
-      state['ndf']['row'] = new_row
-      state['ndf']['col'] = new_col
-      state['ndf']['srcrow'] = row
-      state['ndf']['srccol'] = col
-      state['ndf']['type'] = 'pion'
+      boucle = 0
+      newtokens = copy.deepcopy(tokens)
+      coupinterdit = []
+      while boucle < 3:
+        state['tabeating'] = [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)]
+        table = [[], []]
+        tabpionmanger = looksefairemanger('white', 'black', table)
+        print('tabpionmanger')
+        print(tabpionmanger)
+        if any(tabpionmanger):
+            boucle = 3
+            print('captureavant')
+        print(f'coupinterdit={coupinterdit}')
+        if state['mode'] == 1:
+           (row, col, new_row, new_col) = evaluationdeplacement(newtokens)
+           sortideboucle = 1 
+        else:
+           (row, col, new_row, new_col), sortideboucle = evaluationdeplacement2model(newtokens, coupinterdit)
+        token = tokens[row][col]
+        tokens[row][col] = None
+        token.move(cells[new_row][new_col])
+        tokens[new_row][new_col] = token
+        state['ndf']['row'] = new_row
+        state['ndf']['col'] = new_col
+        state['ndf']['srcrow'] = row
+        state['ndf']['srccol'] = col
+        state['ndf']['type'] = 'pion'
+        state['tabeating'] = [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)]
+        table = [[], []]
+        tabpionmanger = looksefairemanger('white', 'black', table)
+        print('tabpionmanger')
+        print(tabpionmanger)
+        print(boucle)
+        print(sortideboucle)
+        if any(tabpionmanger) and boucle < 3 and sortideboucle == 0:
+            print('verifsi nouvelle provoqué par le coup actif')
+            print(new_row)
+            print(new_col)
+            print(tabpionmanger)
+            print(len(tabpionmanger[0]))
+            print(tabpionmanger[1][0])
+            print(tabpionmanger[0][0])
+            #suppressiondoublons
+            coords = list(zip(tabpionmanger[0], tabpionmanger[1]))
+            coords_uniques = list(dict.fromkeys(coords))
+            tabpionmanger = [
+    [r for r, c in coords_uniques],
+    [c for r, c in coords_uniques],
+]
+            if (len(tabpionmanger[0]) == 1 and tabpionmanger[0][0] == new_row and tabpionmanger[1][0] == new_col):
+                print('provoqué par le coup actif')
+                break
+            print('coup declenchant une capture passive')
+            coupinterdit.append((row, col, new_row, new_col))
+            print(coupinterdit)
+            token = tokens[new_row][new_col]
+            tokens[new_row][new_col] = None
+            token.move(cells[row][col])
+            tokens[row][col] = token
+            
+            
+        else:
+            break
                     # 👑 PROMOTION EN DAME NOIRE
       if new_row == TAILLE - 1 and couleur == 'black':
                         # supprimer le pion
@@ -1505,11 +2190,12 @@ def evaluationdeplacement(tab):
 
                     patch = np.where(patch == 4, 3, patch)    
                     patch_batch = patch[np.newaxis, ..., np.newaxis]
-                    score = model.predict(patch_batch).item()
+                    score = modelblack.predict(patch_batch).item()
                     # 🔹 COMPARAISON
                     if score < meilleur_score:
                         meilleur_score = score
                         meilleur_coup = (row, col, new_row, new_col)
+                    print(f'patch = {patch}')
                     print(f'score = {score}')
                     print(f'meilleur_score = {meilleur_score}')
                     print(f'row = {row}')
@@ -1546,7 +2232,7 @@ def evaluationdeplacement(tab):
 
                         patch = np.where(patch == 4, 3, patch)
                         patch_batch = patch[np.newaxis, ..., np.newaxis]
-                        score = model.predict(patch_batch).item()
+                        score = modelblack.predict(patch_batch).item()
 
                         
                         if score < meilleur_score:
@@ -1564,71 +2250,110 @@ def evaluationdeplacement(tab):
 
     return meilleur_coup
 
-def nevaluationdeplacement(tab, couleur):
-    print("nevaluationdeplacement")
+def evaluationdeplacement2model(tab, coupinterdit):
 
-    meilleurs = []  # liste de tuples (score, coup)
-
-    # paramètres couleur
-    if couleur == 'black':
-        couleur_token = 'black'
-        dir_pion = +1
-        model = modelblack
-    else:
-        couleur_token = 'white'
-        dir_pion = -1
-        model = modelwhite
-
-
+    meilleur_score = float('inf')
+    meilleur_coup = None
+    scores_coups = []  
+    damesblanchepresente, damesnoirpresente  = recherchedame(tokens)
+    if state['mode'] == 2:
+       if damesblanchepresente:
+                        print('damesblanchepresente')
+                        nombrepatchdefense = 5
+                        modelblackdefenseactif = modelblackdefensedames
+       else:
+                        print('damesblanchenonpresente')
+                        nombrepatchdefense = 4
+                        modelblackdefenseactif = modelblackdefense
+                        
+       if damesnoirpresente:
+                        print('damesnoirpresente')
+                        nombrepatchattaque = 5
+                        modelblackattaqueactif = modelblackattaquedames
+       else:
+                        print('damesnoirnonpresente')
+                        nombrepatchattaque = 4
+                        modelblackattaqueactif = modelblackattaque 
+    if state['mode'] == 3:
+        nombrepatchdefense = 4
+        nombrepatchattaque = 6
+        modelblackdefenseactif = modelblackdefensemaitre
+        modelblackattaqueactif = modelblackattaquemaitre
+    table = [[], []]
+    tabpionmanger = looksefairemanger('white', 'black', table)
+    print(tabpionmanger)
     for row in range(TAILLE):
         for col in range(TAILLE):
 
             token = tab[row][col]
-            if token is None or couleur_token not in token._classes:
+            
+            if token is None or 'black' not in token._classes:
                 continue
-
+            
             # =========================
-            # PION
+            # PION NOIR
             # =========================
             if 'dame' not in token._classes:
                 for dcol in (-1, 1):
-                    new_row = row + dir_pion
+                    new_row = row + 1
                     new_col = col + dcol
 
                     if not can_move_black(row, col, new_row, new_col, tab):
                         continue
 
+                    if (row, col, new_row, new_col) in coupinterdit:
+                        continue
+                    # 🔹 COPIE LOGIQUE DU PLATEAU
                     tab_test = copy.deepcopy(tab)
+
+                    # 🔹 SIMULATION LOGIQUE (PAS D'UI)
                     tab_test[row][col] = None
                     tab_test[new_row][new_col] = tab[row][col]
 
-                    plateau_apres = np.array(data(tab_test), dtype=np.float32)
+                    # 🔹 ENCODAGE POUR LE MODÈLE
+                    plateau_avant = np.array(data(tab), dtype=np.float32)   # dataencour
+                    plateau_apres = np.array(data(tab_test), dtype=np.float32)   # dataaprescou
 
+                                            
                     patch = extract_patch(
                         plateau_apres,
-                        new_row,
-                        new_col,
-                        k=3
-                    )
+                        int(new_row),
+                        int(new_col),
+                        k=nombrepatchdefense
+                        )  # shape (5,5)
 
-                    patch = np.where(patch == 4, 3, patch)
                     patch_batch = patch[np.newaxis, ..., np.newaxis]
-                    score = model.predict(patch_batch, verbose=0).item()
+                    
+                    patch = extract_patch(
+                        plateau_apres,
+                        int(new_row),
+                        int(new_col),
+                        k=nombrepatchattaque
+                        )  # shape (5,5)
 
-                    coup = (row, col, new_row, new_col)
-                    meilleurs.append((score, coup))
-                    meilleurs.sort(key=lambda x: x[0])
-                    meilleurs = meilleurs[:2]
-
+                    patch_batchattaque = patch[np.newaxis, ..., np.newaxis]
+                    
+                    score = modelblackdefenseactif.predict(patch_batch).item()
+                    scores_coups.append(
+                    (score, (row, col, new_row, new_col), patch_batch, patch_batchattaque)
+                    )
+                    # 🔹 COMPARAISON
+                    if score < meilleur_score:
+                        meilleur_score = score
+                        meilleur_coup = (row, col, new_row, new_col)
+                    print(f'patch = {patch}')
                     print(f'score = {score}')
-                    print(f'meilleurs = {meilleurs}')
-
+                    print(f'meilleur_score = {meilleur_score}')
+                    print(f'row = {row}')
+                    print(f'col = {col}')
+                    print(f'new_row = {new_row}')
+                    print(f'new_col = {new_col}')
             # =========================
-            # DAME
+            # DAME NOIRE
             # =========================
-            else:
+            if 'dame' in token._classes:
                 directions = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
-
+                print('dameintokenclass')
                 for dr, dc in directions:
                     new_row = row + dr
                     new_col = col + dc
@@ -1637,40 +2362,159 @@ def nevaluationdeplacement(tab, couleur):
 
                         if tab[new_row][new_col] is not None:
                             break
-
+                        if (row, col, new_row, new_col) in coupinterdit:
+                          new_row += dr
+                          new_col += dc
+                          continue
                         tab_test = copy.deepcopy(tab)
                         tab_test[row][col] = None
                         tab_test[new_row][new_col] = tab[row][col]
-
-                        plateau_apres = np.array(data(tab_test), dtype=np.float32)
+                        
+                        plateau_avant = np.array(data(tab), dtype=np.float32)   # dataencour
+                        plateau_apres = np.array(data(tab_test), dtype=np.float32)   # dataaprescoup
 
                         patch = extract_patch(
-                            plateau_apres,
-                            new_row,
-                            new_col,
-                            k=3
-                        )
+                        plateau_apres,
+                        int(new_row),
+                        int(new_col),
+                        k=nombrepatchdefense
+                        )  # shape (5,5)
 
-                        patch = np.where(patch == 4, 3, patch)
                         patch_batch = patch[np.newaxis, ..., np.newaxis]
-                        score = model.predict(patch_batch, verbose=0).item()
 
-                        coup = (row, col, new_row, new_col)
-                        meilleurs.append((score, coup))
-                        meilleurs.sort(key=lambda x: x[0])
-                        meilleurs = meilleurs[:2]
+                        patch = extract_patch(
+                        plateau_apres,
+                        int(new_row),
+                        int(new_col),
+                        k=nombrepatchattaque
+                        )  # shape (5,5)
 
+                        patch_batchattaque = patch[np.newaxis, ..., np.newaxis]
+                        score = modelblackdefenseactif.predict(patch_batch).item()
+                        scores_coups.append(
+                        (score, (row, col, new_row, new_col), patch_batch, patch_batchattaque)
+                        )
+                        
+                        if score < meilleur_score:
+                            meilleur_score = score
+                            meilleur_coup = (row, col, new_row, new_col)
+                        print(f'patch = {patch}')
                         print(f'score = {score}')
-                        print(f'meilleurs = {meilleurs}')
-
+                        print(f'meilleur_score = {meilleur_score}')
+                        print(f'row = {row}')
+                        print(f'col = {col}')
+                        print(f'new_row = {new_row}')
+                        print(f'new_col = {new_col}')
                         new_row += dr
                         new_col += dc
 
-    if not meilleurs:
-        return None
+    # =========================
+    # POST-SELECTION PAR BANDE + SECOND MODELE
+    # =========================
+    
+    if len(scores_coups) == 0:
+       
+       return coupinterdit[0], 1  # sécurité
 
-    # 🎯 choix aléatoire parmi les deux meilleurs
-    return random.choice(meilleurs)[1]
+    #regarder s'il ya des piosn en dangers
+    meilleurs_candidats = []
+    if tabpionmanger:
+      positions_autorisees = set(zip(tabpionmanger[0], tabpionmanger[1]))
+
+      for score, (row, col, new_row, new_col), patch_batch, patchattaque in scores_coups:
+        if (row, col) in positions_autorisees:
+            print(row)
+            print(col)
+            print(score)
+
+            # on stocke TOUTE la ligne scorecoup
+            meilleurs_candidats.append(
+                (score, (row, col, new_row, new_col), patch_batch, patchattaque)
+            )
+
+      # ⬇️ APRÈS la boucle : prendre le meilleur score
+      newmeilleur_coup = None
+
+      if meilleurs_candidats:
+           newmeilleur_coup = meilleurs_candidats[0]
+
+      for coup in meilleurs_candidats[1:]:
+        if coup[0] > newmeilleur_coup[0]:
+            newmeilleur_coup = coup
+
+# résultat final
+      if newmeilleur_coup:
+           print("MEILLEUR COUP :", newmeilleur_coup)
+           if newmeilleur_coup[0] < 0.7:
+               (row, col, new_row, new_col) = newmeilleur_coup[1]
+               newmeilleur_coup = (row, col, new_row, new_col)
+               meilleur_coup = newmeilleur_coup
+               return meilleur_coup, 0
+
+    #regarder dans un premier temps si le meilleurs coup est secure sinon pas la peine de regarder le reste on prend le plus secure
+    if meilleur_score > 0.5:
+        return meilleur_coup, 0
+    # on garde les coups dans [meilleur_score ; meilleur_score + 0.2]
+    band = [
+    (coup, patch, patchattaque)
+    for score, coup, patch, patchattaque in scores_coups
+      if score <= meilleur_score + 0.25
+      ]
+
+# sécurité
+    if len(band) == 0:
+      return meilleur_coup, 0
+        
+    print("meilleur_score =", meilleur_score)
+    print("band (coups) =",
+      [coup for coup, patch, patchattaque in band])
+    scores_second_model = [
+      modelblackattaqueactif.predict(patchattaque).item()
+      for (_, patch, patchattaque) in band
+]
+    print("Scores du second modèle :")
+    for i, (band_elem, score2) in enumerate(zip(band, scores_second_model)):
+      coup = band_elem[0]   # ← uniquement le coup
+      print(f"{i:02d} | coup = {coup} | score2 = {score2:.4f}")
+
+# meilleur selon le second modèle
+    best_idx = int(np.argmax(scores_second_model))
+    meilleur_score = scores_second_model[best_idx]
+    meilleur_coup = band[best_idx][0]
+
+    print(best_idx)
+    print('meilleur_coup')
+    print(meilleur_coup)
+    print(f"meilleur_score: {meilleur_score:.4f}")
+
+# Sélectionner tous les coups avec une différence < 0.15
+    meilleurs_candidats = [meilleur_coup]  # on commence avec le meilleur coup
+    seuil = 0.05
+
+    for i, (band_elem, score2) in enumerate(zip(band, scores_second_model)):
+      if i == best_idx:  # on saute le meilleur coup (déjà ajouté)
+        continue
+    
+      difference = abs(meilleur_score - score2)  # ← INDENTÉ + abs()
+    
+      if difference < seuil:
+        coup = band_elem[0]
+        meilleurs_candidats.append(coup)
+        print(f"✓ Candidat retenu: {coup} | score = {score2:.4f} | diff = {difference:.4f}")
+      else:
+        print(f"✗ Rejeté: coup {band_elem[0]} | score = {score2:.4f} | diff = {difference:.4f}")
+
+    print(f"\nNombre de candidats retenus: {len(meilleurs_candidats)}")
+    print(f"Candidats: {meilleurs_candidats}")
+
+# Choisir aléatoirement parmi les candidats
+    coup_choisi = random.choice(meilleurs_candidats)
+    print(f"Coup choisi aléatoirement: {coup_choisi}")
+
+    return coup_choisi, 0
+
+
+
 
 def move_black_ai():
     state['tabeating'] = [[' ' for _ in range(TAILLE)] for _ in range(TAILLE)]
@@ -1775,10 +2619,20 @@ def move_black_ai():
                      new_row += dr
                      new_col += dc
 
+
       
+# valeur sélectionnée (DONNÉE SIMPLE)
+choix_selectionne = {'value': None}
 
-
-
+def choix_menu(valeur: str):
+    choix_selectionne['value'] = valeur
+    
+def choisir_mode(valeur: str):
+            state['etat'] = 1
+            menu_container.set_visibility(False)
+            print('bestresult')
+            update_best_results() 
+            game_container.set_visibility(True)
 
 
 ui.add_head_html('''
@@ -1902,25 +2756,28 @@ with ui.dialog().props('persistent') as name_dialog:
         ).style('width: 100%; margin-bottom: 20px;')
 
         def validate_name():
+            
             global player_name
             if name_input.value:
                 player_name = name_input.value
-                players = pd.DataFrame(columns=['joueur', 'time'])
+                print(state)
+                players = pd.DataFrame(columns=['joueur', 'time', 'mode'])
                 players.loc[len(players)] = {
                  'joueur': player_name,
-                 'time': state['timefinal']
+                 'time': state['timefinal'],
+                 'mode': state['mode']
                 }
                 
-                if os.path.exists("listes.pkl"):
-                  dfliste = pd.read_pickle("listes.pkl")
-                  dfliste = pd.concat(
-                  [dfliste, players],
-                  ignore_index=True
-                  )
+                dfliste = load_model_from_blob("listes.pkl", "data", blob_service)
+                if dfliste:
+                   dfliste = pd.concat(
+                   [dfliste, players],
+                   ignore_index=True
+                   )
                   
-                  dfliste.to_pickle("listes.pkl")
+                   save_model_to_blob(dflist, "listes.pkl", "data", blob_service)
                 else:
-                  players.to_pickle("listes.pkl")
+                   save_model_to_blob(players, "listes.pkl", "data", blob_service)
                 update_best_results()
                 name_dialog.close()
 
@@ -1947,6 +2804,33 @@ with ui.dialog() as dialog:
         ui.button('OK', on_click=dialog.close).style(
             'background-color: #8B4513; color: white;'
         )
+
+ui.add_head_html("""
+<style>
+    /* Animation pour les cases blanches */
+    @keyframes blink-white {
+        0%, 100% { background-color: white; }
+        50% { background-color: black; }
+    }
+
+    /* Animation pour les cases noires */
+    @keyframes blink-brown {
+        0%, 100% { background-color: #8B4513; } /* Marron (SaddleBrown) */
+        50% { background-color: black; }
+    }
+
+    /* Classe générique pour le clignotement */
+    .anim {
+        animation: blink-white 2s infinite;
+    }
+
+    /* Classe spécifique pour les cases noires */
+    .animnoir {
+        animation: blink-brown 2s infinite;
+    }
+</style>
+""")
+
 with ui.element('div').style(
     '''
     position: fixed;
@@ -1958,30 +2842,92 @@ with ui.element('div').style(
     padding: 16px 0;
     '''
 ):
-    # conteneur vertical (titre + plateau)
     with ui.element('div').classes('center-column').style(
-     'min-height: fit-content;'
-     ):
-      
-        # 🎯 TITRE
+        'min-height: fit-content;'
+    ):
+
+        # 🎯 TITRE (TOUJOURS visible)
         ui.label('Jeu de dames').classes('title')
+
+        # ================= MENU =================
+        menu_container = ui.element('div')
+        
+
+        def choisir_mode(mode: int):
+         state['mode'] = mode
+         state['etat'] = 1
+         menu_container.set_visibility(False)
+         print('bestresult')
+         update_best_results() 
+         game_container.set_visibility(True)
+         if mode == 4:
+             show_message('C est le tour des blancs')
          
-        # ⏱️ CASE TEMPS
-        with ui.element('div').style(
+
+        with menu_container:
+            ui.label('Choisissez votre adversaire').style(
+        '''
+        font-size: 26px;
+        font-weight: bold;
+        margin-bottom: 16px;
+        '''
+    )
+            with ui.column().style('gap: 12px; margin-top: 20px;'):
+                for mode, texte, image_path in [
+        (1, 'BOUBY (Facile)', '/static/images/enfant.png'),
+        (2, 'Beth Harmon (Intermédiaire)', '/static/images/jeudeladame.png'),
+        (3, 'Maitre (Difficile)', '/static/images/expert.png'),
+        (4, 'Jouer contre un ami', '/static/images/expert.png'),           
+    ]:
+                    with ui.element('div').style(
+                        '''
+                       border: 2px solid black;
+                       width: 220px;
+                       height: 55px;
+
+                       display: flex;
+                       align-items: center;        
+                       justify-content: flex-start;
+
+                       padding-left: 20px;        
+                       margin-left: 40px;         
+                       margin-bottom: 10px;
+
+                       cursor: pointer;
+                       border-radius: 8px;
+                       background-color: #e0e0e0;
+                       font-weight: bold;
+                        '''
+                    ).on('click', lambda m=mode: choisir_mode(m)):
+                        
+                        ui.label(texte)
+
+        # ================= JEU =================
+        game_container = ui.element('div')
+        game_container.set_visibility(False)
+
+        with game_container:
+
+            # ⏱️ TEMPS
+            with ui.element('div').style(
     '''
     border: 2px solid black;
     padding: 6px 15px;
-    margin-bottom: 10px;
+    margin: 0 auto 10px auto;  
     border-radius: 8px;
     background-color: #f5f5f5;
     font-size: 13px;
+    width: fit-content;      
     '''
 ):
-            time_label = ui.label('Temps : --:--')
-        with ui.element('div').classes('board-layout'):
-  
-        # ♟️ PLATEAU
-         with ui.element('div').classes('board').style(
+              time_label = ui.label('Temps : --:--')
+            with ui.element('div').classes('board-layout'):
+             # ✅ Bouton retour (tout en haut du jeu)
+             with ui.row().style('width: 100%; justify-content: flex-start; margin-bottom: 10px;'):
+                ui.button('⬅ Retour', on_click=retour_menu).props('outline')
+
+                # ♟️ PLATEAU
+             with ui.element('div').classes('board').style(
             '''
             display: grid;
             grid-template-columns: repeat(10, var(--cell-size));
@@ -1989,7 +2935,7 @@ with ui.element('div').style(
             border: 2px solid black;
             '''
             ):
-            for row in range(TAILLE):
+              for row in range(TAILLE):
                for col in range(TAILLE):
 
                  is_black = (row + col) % 2 == 1
@@ -2009,7 +2955,7 @@ with ui.element('div').style(
 
             # rendre les cases noires cliquables
                  if is_black:
-                      cell.on('click', lambda r=row, c=col: (cell_clic(r, c)))
+                      cell.on('click', lambda r=row, c=col: (clicmode(r, c)))
                       cell.style('cursor: pointer;')
 
             # jetons noirs (4 premières lignes)
@@ -2038,14 +2984,13 @@ with ui.element('div').style(
                      token.move(cell)
                      tokens[row][col] = token
 
-         with ui.element('div').classes('sidebar'):
-            ui.label('🏆 Meilleurs résultats').style(
-            'font-size: 18px; font-weight: bold; margin-bottom: 10px; max-width: 90vw;'
-            )
-            results_column = ui.column().style('gap: 8px;')
+             with ui.element('div').classes('sidebar'):
+               ui.label('🏆 Meilleurs résultats').style(
+               'font-size: 18px; font-weight: bold; margin-bottom: 10px; max-width: 90vw;'
+              )
+               results_column = ui.column().style('gap: 8px;')
+   
 
-
-update_best_results()
 ui.timer(1.0, update_time)
 
 ui.run()
